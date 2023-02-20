@@ -1,0 +1,532 @@
+*********************************************************************************************************
+* MACRO NAME                     : sv
+* MACRO DESCRIPTION              : Automate SV domain
+* DATE                           : 15FEB2023
+* AUTHOR                         : Dony Sabu
+* VALIDATOR                      : 
+* PLATFORM                       : SAS 9.4 Windows 12 
+*********************************************************************************************************
+* MACRO PARAMETERS               : inplib(R)= libname of input/raw dataset
+*                                : subjid(R)= Variable name of subject id or patient id
+*                                : outlib(R)= libname in which the final SV output should be placed
+*                                : vis1(R)= The variable carrying visit information in the input dataset
+*                                : vis2(O)= The variable carrying visit information in the input dataset
+*                                : vis3(O)= The variable carrying visit information in the input dataset
+*                                : incr(R)= Increment for unscheduled/unplanned visit
+*                                : exc_dt(R)= Dates to be excluded
+*                                : exc_data(R)= Name of the datasets to be fully excluded
+*                                : uplndes(O)= The dataset carrying unplanned visit description information
+*                                : byval(O)= The variables use to merge unplanned visit description to sv domain
+*                                : desvar1(O)= Variable specifying unplanned visit description in the dataset specified in uplndes
+*                                : desvar2(O)= Variable specifying unplanned visit description other specify options
+*                                : *R-Required O-Optional
+* ASSUMPTIONS                    : 
+* EXAMPLE                        : %sv(inplib=raw ,
+*                                       outlib=sdtm ,
+*                                       vis1=instancename,
+*                                       vis2=foldername, 
+*                                       vis3=instancerepeatnumber,
+*                                       incr=0.01, 
+*                                       exc_dt=("MAXUPDATED","RECORDDATE","DEATHDAT","MOSLDAT","MOSRDAT","POMRDAT"),
+*                                       exc_data=%str(AE, CAM, CLZBM, CM, CP),
+*                                       uplndes=unsc,
+*                                       byval=instancename instancerepeatnumber,
+*                                       desvar1= unsrsn,
+*                                       desvar2 = unplspec);
+* NOTES                          : 
+* MACROS USED                    : %inbtw
+*********************************************************************************************************
+* CHANGE HISTORY                 :
+* CHANGED BY                     :
+* REASON FOR CHANGE              :
+* DATE CHANGED                   :
+* VALIDATION DONE                :
+*********************************************************************************************************;
+
+%macro sv(inplib= ,subjid = , outlib= , vis1=, vis2=, vis3=, incr=, exc_dt=, exc_data =, uplndes = , byval =, desvar1 =,  desvar2 =  );
+
+*handle data which is slightly different from the other datasets; 
+*handling the condition for raw.vis seperatel-since instancename is populated in lvname and lvdat is the date variable;
+%*let excep_data=%bquote(&inplib..vis(keep=&subjid lvname lvdat rename=(lvname=&vis1.)));
+%*let excep_date=lvdat;
+
+******Custom checks-before starting the program*******
+
+*if inplib is not specified;
+%if %sysfunc(libref(&inplib.)) ne 0 %then %do;
+  %put %str(ER)ROR: Input library is not specified. Check macro parameter IMPLIB.;
+  %return;
+%end;
+%if &subjid.= %then %do;
+  %put %str(ER)ROR: Parameter SUBJID is not specified.;
+  %return;
+%end;
+*if outlib is not specified;
+%if %sysfunc(libref(&outlib.)) ne 0 %then %do;
+  %put %str(ER)ROR: Output library is not specified. Check macro parameter OUTLIB.;
+  %return;
+%end;
+*if vis1, vis2, vis3 exists or not;
+%if &vis1.= and &vis2.= and &vis3.= %then %do;
+  %put %str(ER)ROR: No visit information is passed. Check macro parameter VIS1 or VIS2 or VIS3.;
+  %return;
+%end;
+*if "incr" for defining the order of unscheduled/unplanned visit is given/not;
+%if &incr.= %then %do;
+  %put %str(ER)ROR: No incr information is passed. ;
+  %return;
+%end;
+%if &exc_dt.= %then %do;
+  %put %str(ER)ROR: No variables to be excluded information is passed. Check parameter EXC_DT;
+  %return;
+%end;
+%if &exc_data.= %then %do;
+  %put %str(ER)ROR: No datasets to be excluded information is passed. Check parameter EXC_DATA;
+  %return;
+%end;
+*if sdtm.dm is not found;
+%if %sysfunc(exist(&outlib..dm))=0 %then %do;
+  %put %str(ER)ROR: DM dataset not available in the SDTM library;
+  %return;
+%end;
+*if sdtm.tv is not found;
+%if %sysfunc(exist(&outlib..tv))=0 %then %do;
+  %put %str(ER)ROR: TV dataset not available in the SDTM library;
+  %return;
+%end;
+
+*Taking all datasets to create the excel with required datasets and variables;
+proc contents data = &inplib.._all_ out = all noprint;
+run;
+
+%*let data_2_exc = %sysfunc(upcase(%sysfunc(compress(%sysfunc(translate(&exc_data.,"@",","))))));
+data _null_;
+  length dummy data_2_e $32767;
+  dummy = translate(compress("&exc_data."),"@",",");
+  data_2_e = strip(tranwrd(dummy,"@","@&inplib._"));
+  call symput('data_2_exc','@&inplib._'||strip(data_2_e));
+run;
+
+%put &data_2_exc;
+
+data all1(keep=libname memname datasetname name type format label flag2 flag3);
+  set all;
+*concatenate-libname and memnames;
+  datasetname="'"||catx(".",libname,memname)||"'";
+*flag the data with visit variables;
+  if lowcase(name) in ("&vis1.","&vis2.","&vis3.") then flag2="include data";
+*For excluding the datasets that is not usefull; 
+  if index(upcase("&data_2_exc."),upcase(catx('_',"@&inplib.",strip(memname))))>0 then flag3 = 'exculde data';
+*to subset data that contain vars with labels of date and with the required visit variables;
+  if (find(label,"date","i")>0 and type=1) or lowcase(name) in ("&vis1.","&vis2.","&vis3.");
+run; 
+
+*passing the required raw datasets to a macro variable;
+proc sql noprint;
+  select distinct datasetname into: rawdata separated by ","
+  from all1 where missing(flag3) and flag2 eq "include data";
+quit;
+
+%put &rawdata.;
+
+%macro inbtw(in_dt = all1,cond1=);
+
+*subsetting the required datasets;
+data all3(keep=libname memname name format);
+  set &in_dt.;
+*take the required datasets;
+  if compress(datasetname,"'","") in (&rawdata.) and &cond1. upcase(name) not in &exc_dt.;
+*outputting the datasets with dates only;
+  if lowcase(name) not in("&vis1.","&vis2.","&vis3."); 
+run; 
+
+proc sort data = all3 out = unq_date nodupkey;
+  by name format;
+  where name not in("&vis1.","&vis2.","&vis3.") and scan(name,2,'_') not in ('DD' 'MM' 'YYYY' 'INT');
+run;
+
+data unq_date1;
+  set unq_date;
+  cond = "if cmiss("||strip(name)||")=0 then "||strip(name)||"_ =";
+  strp = "strip(put(";
+  fmt = ",is8601da.));";
+run;
+
+*passing the information to a macro variable, to use it appropriately in a set statement;
+proc sql noprint;
+  select compbl(cat(lowcase(libname),".",lowcase(memname),"(keep= &subjid &vis1. &vis2. &vis3. ",name,")")) 
+  into: datalist separated by " " 
+  from all3 where scan(name,2,'_') not in ('DD' 'MM' 'YYYY' 'INT');
+
+  select distinct name
+  into: varlist separated by " " 
+  from all3 where name not in("&vis1.","&vis2.","&vis3.") and scan(name,2,'_') not in ('DD' 'MM' 'YYYY' 'INT');
+
+  select distinct strip(cond)||strip(strp)||strip(name)||strip(fmt) into : dateonly separated by '  '
+  from unq_date1 where upcase(format) = 'DATE';
+
+  select distinct strip(cond)||strip(strp)||"datepart("||strip(name)||")"||strip(fmt) into : datetime separated by '  '
+  from unq_date1 where upcase(format) = 'DATETIME';
+
+  select distinct strip(name)||"_" into : udtvar separated by '  '
+  from unq_date1;
+quit;
+
+%put &varlist.;
+
+*to return if there is no date variable/ no date variable with type=1 in the input data;
+%if %bquote(&varlist.) = %str() %then %do;
+  %put %str(ER)ROR: No date variables available in the input dataset, please check;
+  %return;
+%end;
+
+*combine all the datasets;
+data d2_comb;
+    set &datalist. /*&excep_data.*/;
+run;
+
+*adjust d2_comb in the required way;
+data d3(drop=&vis1. rename=(&vis1._=&vis1.));
+  set d2_comb;
+  &dateonly.; &datetime.;
+/*  date=coalesce(of &varlist., &excep_date.);*/
+  date=coalescec(of &udtvar.);
+  if not missing(date) then visitdate=strip(date);
+*to combine the visit information- as for some data it is populated in instancename, others in foldername;
+  if not missing(&vis1.) then &vis1._=&vis1.;
+  else if missing(&vis1.) and not missing(&vis2.) then &vis1._=&vis2.;
+  if not missing(visitdate);
+run;
+
+data _null_;
+  call symput("allvis",strip(catx("  ","&vis1.","&vis2.","&vis3.")));
+run;
+
+*split into scheduled and unscheduled visits;
+data unsch sch;
+  set d3(keep= &subjid &allvis. visitdate);  
+  if prxmatch('/Unscheduled|Unplanned|Unsched|Unplan/i', &vis1.) then
+    output unsch;
+  else output sch;
+run;
+
+*take the distinct visits from the scheduled dataset;
+proc sql noprint;
+  create table visitnm as
+  select distinct &vis1. from sch;
+quit;
+%mend inbtw;
+%inbtw(in_dt = all1);
+
+*to check if the excel file-with the required raw dataset, variables exists;
+%let myfilerf="%sysfunc(pathname(&outlib.))\required_data1.xlsx";  
+                                                                                                                 
+%if %sysfunc(fileexist(&myfilerf)) %then %do;
+  %put The external file &myfilerf exists, importing the file to ALL2;
+  %*if the excel file exists, importing the file; 
+    proc import datafile="%sysfunc(pathname(&outlib.))\required_data1.xlsx" 
+      out=all2
+      dbms=xlsx 
+      replace;
+      sheet="raw_datasets";
+   run;
+
+  %*define the library-excel;
+    libname excel XLSX "%sysfunc(pathname(&outlib.))\required_data1.xlsx";
+
+  %*take the contents of excel library;
+    proc contents data=excel._all_ out=vis_tab1 noprint;
+    run;
+
+  %*pass the name of worksheets into a macro;
+    proc sql noprint;
+      select distinct memname into: s1 separated by " " from vis_tab1;
+	quit;
+
+  %*check if the "visit_fmt" tab-containing the scheduled visits-exists in the excel;
+	%if %sysfunc(find(&s1.,VISIT_FMT))>0  %then %do;   
+	 %put Worksheet containing visit information, importing to vis_dt1;
+	 %*importing visit info;
+	  proc import datafile="%sysfunc(pathname(&outlib.))\required_data1.xlsx" 
+	    out=vis_dt1
+	    dbms=xlsx 
+	    replace;
+	    sheet="visit_fmt";
+	  run;
+	%end; 
+%end; 
+  %*if the excel file doesnot exists, exporting the file; 
+  %else %do;
+    proc export data=all1 
+       outfile="%sysfunc(pathname(&outlib.))\required_data1.xlsx"
+       dbms=xlsx 
+       replace;
+       sheet="raw_datasets";
+	 run;
+    %put %str(WARN)ING: Add flag1 column with values 'exclude var' in the 1st tab RAW_DATASETS. Add the planned visits from TV in the VISIT_FMT tab;
+	  %*exporting visit info;
+	  proc export data=visitnm 
+	    outfile="%sysfunc(pathname(&outlib.))\required_data1.xlsx"
+	    dbms=xlsx 
+	    replace;
+	    sheet="visit_fmt";
+	  run;  
+   %return;
+  %end;
+
+%inbtw(in_dt = all2,cond1 = missing(flag1) and);
+
+data _null_;
+  call symput("allvis",strip(catx("  ","&vis1.","&vis2.","&vis3.")));
+run;
+*sorting unscheduled visits and taking it seperately;
+proc sort data=unsch out=unsch_st nodupkey;
+  by &allvis. &subjid visitdate;
+run;
+
+%*For assigning SVUPDES variable checking whether parameter uplndes is assigned;
+%if %str(&uplndes) ne %str() %then %do;
+    %let updesby = %sysfunc(translate(%sysfunc(compbl(&byval.)),", "," "));
+
+    %if %str(&desvar2) eq %str() %then %do; 
+      %let dvar2 = %str(" ");
+	%end;
+  
+	*assigning svstdtc/svendtc directly since for unscheduled visit- both are same;
+    proc sql noprint;
+	  create table unsch_st1 as 
+	  select distinct &updesby., &subjid , min(visitdate) as svstdtc , max(visitdate) as svendtc, "Unscheduled" as visit_
+	  from unsch_st
+	  group by &updesby., &subjid;
+	quit;
+
+	*for assigning svupdes;
+	proc sort data=&inplib..&uplndes. out=unsc_st(keep= &byval. &desvar1. &desvar2. &subjid);
+	  by &byval. &subjid;
+	run; 
+
+	*merging unsch_st and unsc_st;
+	data unsch2(drop= &desvar1. &desvar2.);
+	  length &vis1. $765;
+	  merge unsch_st1(in=in1) unsc_st(in=in2);
+	  by &byval. &subjid;
+	  if in1;
+	  svupdes=catx("-",strip(&desvar1.),strip(&dvar2.));
+	run;
+	%let svupdes = svupdes;
+%end;
+  %else %do;
+   data _null_;
+     call symput("visall",strip(catx(",","&vis1.","&vis2.","&vis3.")));
+   run;
+ 
+    proc sql noprint;
+	  create table unsch2 as 
+	  select distinct &visall., &subjid , min(visitdate) as svstdtc , max(visitdate) as svendtc, "Unscheduled" as visit_
+	  from unsch_st
+	  group by &visall., &subjid;
+	quit;
+	%let svupdes = %str();
+  %end;
+*deriving the svstdtc/svendtc for scheduled visit;
+*sorting scheduled visit and taking it seperately;
+proc sort data=sch out=sch_st nodupkey;
+  by &vis1. &subjid visitdate;
+run;
+
+*seperating the data containing svstdtc, svendtc seperately;
+data sch1_st(keep=&vis1. &subjid svstdtc) sch1_ed(keep=&vis1. &subjid svendtc);
+  set sch_st;
+  by &vis1. &subjid visitdate;
+  if first.&subjid then svstdtc=visitdate;
+  if last.&subjid then svendtc=visitdate;
+  if not missing(svstdtc) then output sch1_st;
+  if not missing(svendtc) then output sch1_ed;
+run;
+
+*merging scheduled and unscheduled visits;
+data sch2;
+  merge sch1_st(in=in1) sch1_ed(in=in2);
+  by &vis1. &subjid;
+  if in1;
+run;
+
+*sorting vis_dt1 dataset;
+proc sort data=vis_dt1;
+  by &vis1.;
+run;
+
+*bring the standard TV visits to sch2 data;
+data sch2_vis;
+  merge sch2(in=in1) vis_dt1(in=in2);
+  by &vis1.;
+  if in1;
+run;
+
+*sorting tv, sch2_vt dataset;
+proc sort data=&outlib..tv(keep=visit visitnum visitdy) out=tv_srt nodupkey;
+  by visit;
+run;
+
+proc sort data=sch2_vis out=sch2_srt;
+  by visit_;
+run;
+
+*merging sch2_srt and tv_srt;
+data sch3;
+  merge sch2_srt(in=in1) tv_srt(in=in2 rename=(visit=visit_));
+  by visit_;
+  if in1;
+run;
+
+*combining scheduled and unscheduled visits;
+data sv1(keep=&subjid &svupdes. svstdtc svendtc visit_ visitnum visitdy);
+  set sch3 unsch2;
+run;
+
+proc sort data =sv1 out=sv1_st;
+  by &subjid svstdtc;
+run;
+
+data sv2(drop=visit_ visit_r);
+ set sv1_st;
+ by &subjid;
+ retain visit_r 0;
+*deriving visitnum;
+ if first.&subjid then visit_r = visitnum;
+ if visit_ = "Unscheduled" then visitnum = visit_r + &incr.;
+ visit_r = visitnum;
+*deriving visit;
+ if visit_ = "Unscheduled" then visit=strip(visit_)||" "||strip(put(visitnum,best.));
+ else visit=strip(visit_);
+run; 
+
+proc sort data=sv2;
+  by &subjid svstdtc visitnum;
+run;
+
+*sorting dm data and merging with sv2 data;
+proc sort data=&outlib..dm out=dm(rename=(subjid=&subjid));
+  by subjid;
+run;
+ 
+data sv3(drop=svstdtc_date rfstdtc_date svendtc_date &subjid rfstdtc rfxstdtc);
+  length studyid $19 domain $2  usubjid $27; 
+  merge sv2(in=in1) dm(in=in2 keep=studyid usubjid &subjid rfstdtc rfxstdtc);
+  by &subjid;
+  if in1; 
+*populating domain, svstdy, svendy;
+  domain="SV";
+  if cmiss(svstdtc,rfstdtc)=0 then do;
+    svstdtc_date= input(substr(svstdtc,1,10),yymmdd10.);
+    rfstdtc_date= input(substr(rfstdtc,1,10),yymmdd10.);
+    svstdy=svstdtc_date-rfstdtc_date+ (svstdtc_date >=rfstdtc_date);
+  end;
+  if cmiss(svendtc,rfstdtc)=0 then do;
+    svendtc_date= input(substr(svendtc,1,10),yymmdd10.);
+    rfstdtc_date= input(substr(rfstdtc,1,10),yymmdd10.);
+    svendy=svendtc_date-rfstdtc_date+ (svendtc_date >=rfstdtc_date);
+  end;
+proc sort;
+  by studyid usubjid visitnum;
+run;
+
+%*Creating dummy dataset for SV variable attributes;
+data sv_dummy;
+  length varib $8 label $40;
+  varib = 'STUDYID';label='Study Identifier'; varnum = 1;
+  output;
+  varib = 'DOMAIN';label='Domain Abbreviation';varnum = 2;
+  output;
+  varib = 'USUBJID';;label='Unique &subjid Identifier';varnum = 3;
+  output;
+  varib = 'SVREFID';label='Reference ID' ;varnum = 4;
+  output;
+  varib = 'VISITNUM';label='Visit Number' ;varnum = 5;
+  output;
+  varib = 'VISIT';label='Visit Name' ;varnum = 6;
+  output;
+  varib = 'VISITDY'; label='Planned Study Day of Visit';varnum = 7;
+  output;
+  varib = 'EPOCH'; label='Epoch' ;varnum = 8;
+  output;
+  varib = 'SVSTDTC'; label='Start Date/Time of Visit' ;varnum = 9;
+  output;
+  varib = 'SVENDTC'; label='End Date/Time of Visit' ;varnum = 10;
+  output;
+  varib = 'SVSTDY'; label='Study Day of Start of Visit' ;varnum = 11;
+  output;
+  varib = 'SVENDY'; label='Study Day of End of Visit' ;varnum = 12;
+  output;
+  varib = 'SVUPDES'; label='Description of Unplanned Visit' ;varnum = 13;
+  output;
+proc sort;
+  by varib;
+run;
+
+%*Supressing the length of SV variables into maximum of its values.;
+data meta;
+  set sv3;
+  seqid=_n_;
+run;
+
+proc transpose data = meta out=meta_t name=variable;
+  by seqid ;
+  var _character_;
+run;
+
+proc sql;
+  create table length as 
+  select distinct variable, max(length(col1)) as length
+  from meta_t
+  group by variable;
+
+  create table varnames as
+  select distinct upcase(name) as varib length 8 
+  from sashelp.vcolumn
+  where libname = 'WORK' and memname = 'SV3';
+quit; 
+
+data svattrib;
+  merge sv_dummy(in=a) varnames(in=b);
+  by varib;
+  if b;
+run;
+
+proc sql noprint;
+  select strip(variable)||" "||"$"||strip(put(length,best.)) into: base separated by " " 
+  from length;
+
+  select strip(varib)||"="||'"'||strip(label)||'"' into:lbl separated by " "
+  from svattrib;
+
+  select varnum, varib into :num   separated by " ", :odr  separated by " " 
+  from svattrib
+  order by varnum; 
+
+  select distinct strip(strip(varib)||"_") into:renam separated by " "
+  from svattrib;
+quit;
+
+data rename;
+  set meta;
+  rename %do i=1 %to %sysfunc(countw(&odr.)); %scan(&odr.,&i," ")=%scan(&renam.,&i," ") %end; ;
+run;
+
+*Generating sv dataset;
+data &outlib..sv_rr2(label="&subjid Visits");
+  retain &odr.;
+  length &base.;
+  set rename;
+  %do i= 1 %to %sysfunc(countw(&odr.));
+    %scan(&odr.,&i," ")=%scan(&renam.,&i," ") ;
+  %end;
+  label &lbl.;
+  keep &odr.;
+run;
+
+%*Deleting unwanted datasets in work library;
+proc delete data= length meta meta_t varnames svattrib rename;
+run;
+
+%mend sv;
